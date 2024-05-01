@@ -1,0 +1,468 @@
+# Copyright 2022 Amazon.com and its affiliates; all rights reserved.
+# This file is Amazon Web Services Content and may not be duplicated or distributed without permission.
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: This CFn deploys the application infraestructure in the Secondary Region.
+
+Parameters:
+  # These parameters are nedded to deploy the ECS application in the Second Region
+  VPC:
+    Description: The VPC ID created using the CFn dr_region_app_cfn.yaml
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetOne:
+    Description: The PublicSubnetOne created using the CFn dr_region_app_cfn.yaml
+    Type: AWS::EC2::Subnet::Id
+  PublicSubnetTwo:
+    Description: The PublicSubnetTwo created using the CFn dr_region_app_cfn.yaml
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnetOne:
+    Description: The PrivateSubnetOne created using the CFn dr_region_app_cfn.yaml
+    Type: AWS::EC2::Subnet::Id
+  PrivateSubnetTwo:
+    Description: The PrivateSubnetTwo created using the CFn dr_region_app_cfn.yaml
+    Type: AWS::EC2::Subnet::Id
+  SecondRegionStaticFilesBucket:
+    Description: 'e.g.: gameday-images-${AWS::AccountId}-${AWS::Region}'
+    Type: String
+    AllowedPattern: ^(?!s3://|https?://)(.*[^/])?$
+    ConstraintDescription: Name should not contain s3://, http://, https://, or trailing slash (/)
+  SecondRegionContainerImage:
+    Description: 'e.g.:
+      ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/flask-api:latest'
+    Type: String
+    AllowedPattern: ^([a-zA-Z0-9]+\.dkr\.ecr\.[a-zA-Z0-9-]+\.amazonaws\.com\/[a-zA-Z0-9-]+:[a-zA-Z0-9-]+)?$
+    ConstraintDescription: Image name should follow the format
+      xxxxxxxxxxxx.dkr.ecr.xxxxx.amazonaws.com/xxxx:xxxx
+  CloudFrontDomain:
+    Type: String
+    AllowedPattern: ^(?!https?://)(?!.*\/$).*
+    ConstraintDescription: CloudFront domain name should not contain http://,
+      https://, or trailing slash (/)
+  SecondRegionDatabaseEndpoint:
+    Type: String
+  DatabaseName:
+    Description: 'tip: You can use the default if you haven''t changed'
+    Type: String
+    Default: cavsdb
+  DatabaseUser:
+    Description: 'tip: You can use the default if you haven''t changed'
+    Type: String
+    Default: admin
+  DatabaseUserPass:
+    Description: 'tip: You can use the default if you haven''t changed'
+    Type: String
+    Default: adminadmin
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration (Use the outputs from dr_region_vpc_cfn.yaml
+            stack)
+        Parameters:
+          - VPC
+          - PublicSubnetOne
+          - PublicSubnetTwo
+          - PrivateSubnetOne
+          - PrivateSubnetTwo
+      - Label:
+          default: Aplication Configuration (After Database, S3 and ECR image are being
+            replicated!)
+        Parameters:
+          - SecondRegionStaticFilesBucket
+          - SecondRegionContainerImage
+          - CloudFrontDomain
+          - SecondRegionDatabaseEndpoint
+          - DatabaseName
+          - DatabaseUser
+          - DatabaseUserPass
+    ParameterLabels:
+      VPC:
+        default: The VPC ID created using the CFn dr_region_vpc_cfn.yaml
+      PublicSubnetOne:
+        default: The PublicSubnetOne created using the CFn dr_region_vpc_cfn.yaml
+      PublicSubnetTwo:
+        default: The PublicSubnetTwo created using the CFn dr_region_vpc_cfn.yaml
+      PrivateSubnetOne:
+        default: The PrivateSubnetOne created using the CFn dr_region_vpc_cfn.yaml
+      PrivateSubnetTwo:
+        default: The PrivateSubnetTwo created using the CFn dr_region_vpc_cfn.yaml
+      SecondRegionStaticFilesBucket:
+        default: 'The name of the S3 bucket where static files are stored in the second
+          region (tip: bucket being replicated)'
+      SecondRegionContainerImage:
+        default: 'The ECR and Image to be deployed on ECS in the Secondary Region. (tip:
+          Your ECR are being replicated?)'
+      CloudFrontDomain:
+        default: The CloudFront domain used to serve the S3 static files without
+          http://, https://, or trailing slash (/)
+      SecondRegionDatabaseEndpoint:
+        default: The endpoint of the Database in the Secondary Region
+      DatabaseName:
+        default: The database name
+      DatabaseUser:
+        default: The admin username
+      DatabaseUserPass:
+        default: The admin password
+
+Resources:
+  # Creating SSM Paramters to be used by Application
+  DatabaseEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CAVS_DB_ENDPOINT
+      Type: String
+      Value: !Ref SecondRegionDatabaseEndpoint
+      Description: SSM Parameter for the database endpoint
+
+  DatabaseDBParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CAVS_DB_DATABASE
+      Type: String
+      Value: !Ref DatabaseName
+      Description: SSM Parameter for the database name
+
+  DatabaseUserParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CAVS_DB_USER
+      Type: String
+      Value: !Ref DatabaseUser
+      Description: SSM Parameter for the database user
+
+  DatabasePassParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CAVS_DB_PASSWORD
+      Type: String
+      Value: !Ref DatabaseUserPass
+      Description: SSM Parameter for the database password
+
+  BucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: BUCKET_NAME
+      Type: String
+      Value: !Ref SecondRegionStaticFilesBucket
+      Description: SSM Parameter for the bucket name
+
+  CloudFrontURLParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: CLOUDFRONT_URL
+      Type: String
+      Value: !Ref CloudFrontDomain
+      Description: SSM Parameter for the CloudFront endpoint
+
+  FlaskApiEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub Cluster-${AWS::StackName}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  FlaskApiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - FlaskApiEcsCluster
+      - FlaskApiListener
+      - FlaskApiInputsListenerRule
+    Properties:
+      ServiceName: !Sub ${AWS::StackName}_FlaskApi-Service
+      Cluster: !Ref FlaskApiEcsCluster
+      TaskDefinition: !Ref FlaskApiTaskDefinition
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: false
+          Rollback: false
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      DesiredCount: 1
+      # This may need to be adjusted if the container takes a while to start up
+      HealthCheckGracePeriodSeconds: 30
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !Ref PrivateSubnetOne
+            - !Ref PrivateSubnetTwo
+          SecurityGroups:
+            - !Ref FargateContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: flask-api
+          ContainerPort: 80
+          TargetGroupArn: !Ref FlaskApiTargetGroup
+
+  FargateContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the fargate containers from the Internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          Description: Allows access from ALB
+          SourceSecurityGroupId: !Ref FlaskApiLoadBalancerSecurityGroup
+
+  FlaskApiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /api/v1/apistatus
+      HealthCheckProtocol: HTTP
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 3
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 30
+      VpcId: !Ref VPC
+      TargetType: ip
+
+  FlaskApiLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: flask-api-second-region-alb
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref FlaskApiLoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+
+  FlaskApiLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub flask-api-sg-${AWS::StackName}
+      GroupDescription: Allows access to from internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  FlaskApiListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref FlaskApiTargetGroup
+          Type: forward
+      LoadBalancerArn: !Ref FlaskApiLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  FlaskApiInputsListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref FlaskApiTargetGroup
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /*
+      ListenerArn: !Ref FlaskApiListener
+      Priority: 5
+
+  FlaskApiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: 512
+      ExecutionRoleArn: !GetAtt EcsServiceRole.Arn
+      Family: !Sub DR-FlaskApi-${AWS::StackName}
+      Memory: 1024
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+      ContainerDefinitions:
+        - Name: flask-api
+          Image: !Ref SecondRegionContainerImage
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: http
+          Environment:
+            - Name: APP_CLIENT_ID
+              Value: TEST
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FlaskApiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: awslogs-flaskapi-service
+          Essential: true
+        - Name: xray-daemon
+          Image: public.ecr.aws/xray/aws-xray-daemon:latest
+          PortMappings:
+            - ContainerPort: 2000
+              Protocol: udp
+
+  FlaskApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      RetentionInDays: 7
+
+  EcsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs.amazonaws.com
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  # Rules which allow ECS to attach network interfaces to instances
+                  # on your behalf in order for awsvpc networking mode to work right
+                  - ec2:AttachNetworkInterface
+                  - ec2:CreateNetworkInterface
+                  - ec2:CreateNetworkInterfacePermission
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DeleteNetworkInterfacePermission
+                  - ec2:Describe*
+                  - ec2:DetachNetworkInterface
+
+                  # Rules which allow ECS to update load balancers on your behalf
+                  # with the information sabout how to send traffic to your containers
+                  - elasticloadbalancing:DeregisterInstancesFromLoadBalancer
+                  - elasticloadbalancing:DeregisterTargets
+                  - elasticloadbalancing:Describe*
+                  - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+                  - elasticloadbalancing:RegisterTargets
+
+                  # Rules which allow ECS to run tasks that have IAM roles assigned to them.
+                  - iam:PassRole
+
+                  # Rules that let ECS interact with container images.
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+
+                  # Rules that let ECS create and push logs to CloudWatch.
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+
+                Resource: '*'
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DeleteSecret
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                  - ssm:GetParameter
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  # Allow the ECS Tasks to download images from ECR
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+
+                  # Allow the ECS tasks to upload logs to CloudWatch
+                  - logs:CreateLogStream
+                  - logs:CreateLogGroup
+                  - logs:PutLogEvents
+
+                  # S3 actions.
+                  - s3:*
+                Resource: '*'
+
+              - Effect: Allow
+                Action:
+                  # Allows the ECS tasks to interact with only the QDKTable
+                  # in DynamoDB
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:DescribeTable
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                Resource: '*'
+                #  - !GetAtt DynamoDbOutputsTable.Arn
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DeleteStackInstances
+                  - cloudformation:ListStackInstances
+                  - cloudformation:DeleteStackSet
+                  - cloudformation:DescribeStackSetOperation
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                  - codepipeline:StartPipelineExecution
+                  - sts:assumeRole
+                Resource: '*'
+        - PolicyName: SecretsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:ListSecrets
+                  - ssm:GetParameter
+                Resource: '*'
+        - PolicyName: ParametersPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: '*'
+
+Outputs:
+  SecondRegionALB:
+    Description: The LB DNS of the running the web application
+    Value: !GetAtt FlaskApiLoadBalancer.DNSName

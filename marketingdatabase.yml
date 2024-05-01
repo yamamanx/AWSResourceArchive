@@ -1,0 +1,16 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Resources:
+  MyRDSDB:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBName: "Marketing"
+      DBInstanceClass: "db.t2.small"
+      AllocatedStorage: '20'
+      Engine: MySQL
+      MasterUsername: '{{resolve:ssm:MasterUserName:1}}'
+      MasterUserPassword: '{{resolve:ssm-secure:MasterUserPassword:1}}'
+Outputs:
+  DbInstanceId:
+    Description: InstanceID of My RDS DB
+    Value: !Ref MyRDSDB
